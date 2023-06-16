@@ -219,6 +219,25 @@ bool PlayList::IsPlay() const
 //-------------------------------------------------------------------------------------------------------
 
 
+class MusicPlayer
+{
+public:
+    MusicPlayer();
+    void AddPlayList(std::string plName);
+    void RemovePlayList(std::string plName);
+    void AddSong(std::string plName, std::string songName);
+    void RemovePlayListSong(std::string plName, std::string songName);
+    void Run();
+    void Play();
+    void Stop();
+    void NextSong();
+    //void NextPlayList();
+
+private:
+    std::map<std::string, PlayList> m_playLists;
+    AudioFile* m_currSong;  // AF represent AudioFile
+    PlayList* m_currPL;     // PL represent playlist
+};
 
 
 
