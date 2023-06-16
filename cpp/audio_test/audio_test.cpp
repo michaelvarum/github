@@ -6,7 +6,8 @@
 #include <chrono>
 #include <atomic>
 #include <condition_variable>
-
+#include <string>
+#include <map>
 class AudioFile
 {
 public:
@@ -70,7 +71,7 @@ bool AudioFile::IsPlay() const
 class PlayList
 {
 public:
-    PlayList();
+    PlayList(std::string plName);
     ~PlayList();
     void AddAudioFile(const std::string& filename);
     void Run();
@@ -88,10 +89,11 @@ private:
     std::condition_variable m_conditionVariable;
     std::mutex m_mutex;
     std::thread m_thread;
+    std::string m_plName;
 };
 
-PlayList::PlayList()
-: m_audioFiles(), m_currAF(nullptr), m_currIndxAF(0), m_isPlay(false)
+PlayList::PlayList(std::string plName)
+: m_audioFiles(), m_currAF(nullptr), m_currIndxAF(0), m_isPlay(false), m_plName(plName)
 {
     // Start the thread
     m_thread = std::thread(&PlayList::Run, this);
@@ -217,26 +219,6 @@ bool PlayList::IsPlay() const
 //-------------------------------------------------------------------------------------------------------
 
 
-class MusicPlayer
-{
-public:
-    MusicPlayer();
-    void AddPlayList();
-    void RemovePlayList();
-    void AddSong(string plName, string songName);
-    void RemovePlayListSong(string plName, string songName);
-    void Run();
-    void Play();
-    void Stop();
-    void NextSong();
-    //void NextPlayList();
-
-private:
-    map<string, PlayList> m_playLists;
-    Song* m_currSong;
-    PlayList* m_currPlayList;
-    UserInterface* m_interface;
-};
 
 
 
@@ -246,7 +228,7 @@ private:
 
 int main()
 {
-    PlayList playlist;
+    PlayList playlist("pl_1");
     playlist.AddAudioFile("song1.wav");
     playlist.AddAudioFile("song2.wav");
 
