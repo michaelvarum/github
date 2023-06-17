@@ -57,9 +57,8 @@ class UserInterface
 {
 public:
     UserInterface();
-    void RunInterface();
 private:
-    
+    void RunInterface();
 };
 
 //-------------------------------- Song Class Declaration --------------------------------//
