@@ -10,6 +10,17 @@
 #include <condition_variable>
 #include <string>
 #include <map>
+#include <functional>
+#include <sys/time.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <unistd.h>
+#include <boost/interprocess/sync/interprocess_semaphore.hpp>
+
+class MusicPlayer;
+
+
+
 class AudioFile
 {
 public:
@@ -128,36 +139,65 @@ void PlayList::AddAudioFile(const std::string& filename)
 class UserInterface
 {
 public:
-    UserInterface();
+    UserInterface(std::atomic<int>* event, 
+                  size_t socketsAmout, 
+                  boost::interprocess::interprocess_semaphore *semaphore, 
+                  std::mutex* eventsMutex,
+                  std::condition_variable* eventsConditionVariable,
+                  std::atomic<bool>* isExit);
+    ~UserInterface();
 private:
     void RunInterface();
     std::thread m_threadRunInterface;
+    std::atomic<int>* m_event;
+    size_t m_eventsAmout;
+    boost::interprocess::interprocess_semaphore *m_semaphore;
+    std::mutex* m_eventsMutex;
+    std::condition_variable* m_eventsConditionVariable;
+    std::atomic<bool>* m_isExit;
 };
 
-UserInterface::UserInterface()
-: m_threadRunInterface(std::thread(&UserInterface::RunInterface, this))
+UserInterface::UserInterface(std::atomic<int>* event, 
+                             size_t eventsAmout, 
+                             boost::interprocess::interprocess_semaphore *semaphore, 
+                             std::mutex* eventsMutex,
+                             std::condition_variable* eventsConditionVariable,
+                             std::atomic<bool>* isExit)
+: m_threadRunInterface(std::thread(&UserInterface::RunInterface, this)),
+  m_event(event),
+  m_eventsAmout(eventsAmout),
+  m_semaphore(semaphore),
+  m_eventsMutex(eventsMutex),
+  m_eventsConditionVariable(eventsConditionVariable),
+  m_isExit(isExit)
 {}
+
+UserInterface::~UserInterface()
+{
+    m_threadRunInterface.join();
+}
 
 void UserInterface::RunInterface()
 {
+    m_semaphore->wait();
     sf::RenderWindow window(sf::VideoMode(800, 600), "SFML GUI with Buttons");
 
     sf::Font font;
-    if (!font.loadFromFile("/usr/share/fonts/truetype/msttcorefonts/arial.ttf")) {
+    if (!font.loadFromFile("/usr/share/fonts/truetype/msttcorefonts/arial.ttf")) 
+    {
         // Handle font loading error
     }
 
     // Texts for buttons
-    const int numButtons = 9;
-    sf::Text buttonText[numButtons];
+    sf::Text buttonText[m_eventsAmout];    // Minus 1 because there is exit button. 
     
     std::string buttonNames[] =
     {
         "AddPlayList", "AddAudioFile", "RemovePlayList", "RemoveAudioFile",
-        "Run", "Play", "Stop", "Next", "Prev"
+        "Play", "Stop", "Next", "Prev", "Exit"
     };
 
-    for (int i = 0; i < numButtons; i++) 
+    for (int i = 0; i < m_eventsAmout; i++) 
     {
         buttonText[i].setFont(font);
         buttonText[i].setCharacterSize(18);
@@ -170,10 +210,11 @@ void UserInterface::RunInterface()
     }
 
     // Buttons
-    sf::RectangleShape buttons[numButtons];
-    for (int i = 0; i < numButtons; i++) {
+    sf::RectangleShape buttons[m_eventsAmout];
+    for (int i = 0; i < m_eventsAmout; i++) 
+    {
         buttons[i].setSize(sf::Vector2f(200, 50));
-        buttons[i].setFillColor(sf::Color::Green);
+        buttons[i].setFillColor(sf::Color::Red);
 
         // Determine the position based on the column and row
         int column = i % 2;
@@ -186,8 +227,15 @@ void UserInterface::RunInterface()
         sf::Event event;
         while (window.pollEvent(event))
         {
-            if (event.type == sf::Event::Closed)
+            if (event.type == sf::Event::Closed || *m_isExit)
+            {
+                event.type = sf::Event::Closed;
+                m_eventsMutex->lock();
+                *m_event = 8;   // its exit
                 window.close();
+                m_eventsConditionVariable->notify_one();
+                m_eventsMutex->unlock();
+            }
 
             if (event.type == sf::Event::MouseButtonPressed)
             {
@@ -196,12 +244,17 @@ void UserInterface::RunInterface()
                     sf::Vector2i mousePos = sf::Mouse::getPosition(window);
                     sf::Vector2f mousePosF(static_cast<float>(mousePos.x), static_cast<float>(mousePos.y));
 
-                    for (int i = 0; i < numButtons; i++) {
+                    for (int i = 0; i < m_eventsAmout; i++) 
+                    {
                         if (buttons[i].getGlobalBounds().contains(mousePosF))
                         {
                             // Button i+1 was clicked
                             // Add your button functionality here
+                            m_eventsMutex->lock();
                             std::cout << buttonNames[i] << std::endl;
+                            *m_event = i;   // Update the event
+                            m_eventsConditionVariable->notify_one();
+                            m_eventsMutex->unlock();
                         }
                     }
                 }
@@ -210,7 +263,8 @@ void UserInterface::RunInterface()
 
         window.clear();
 
-        for (int i = 0; i < numButtons; i++) {
+        for (int i = 0; i < m_eventsAmout; i++) 
+        {
             window.draw(buttons[i]);
             window.draw(buttonText[i]);
         }
@@ -222,146 +276,29 @@ void UserInterface::RunInterface()
 
 
 
-
-//-------------------------------------------------------------------------------------------------------
-
-
-
-
-class Reactor
+class MusicPlayer
 {
 public:
     enum EVENT
     {
-        READ = 0,
-        WRITE = 1,
-        ERROR = 2,
-        NUM_OF_EVENTS = 3
+        NO_EVENT = -1,
+        ADD_PLAY_LIST = 0,
+        ADD_AUDIO_FILE = 1,
+        REMOVE_PLAY_LIST = 2,
+        REMOVE_AUDIO_FILE = 3,
+        PLAY = 4,
+        STOP = 5,
+        NEXT = 6,
+        PREV = 7,
+        EXIT = 8
     };
-
-    Reactor();
-    void Add(int fd, EVENT event, std::function<void(int)> func); // subscribe
-    void Remove(int fd, EVENT event, std::function<void(int)> func); // unsubscribe
-    void Run(timeval *timeout);  // loop with select, should be blocking
-    void Stop();
-
-private:
-    struct Subscriber
-    {
-    public:
-        int m_fd;
-        EVENT m_event;
-        std::function<void(int)> m_func;
-        bool operator==(const Subscriber subscriber_arg)const;
-    };
-    bool m_is_running;
-    std::vector<Subscriber> m_subscribers; 
-    
-};
-
-Reactor::Reactor()
-: m_is_running(false), m_subscribers(0)
-{}
-
-
-void Reactor::Add(int fd, EVENT event, std::function<void(int)> func)
-{
-    m_subscribers.push_back(Subscriber({fd, event, func}));
-}
-
-
-void Reactor::Remove(int fd, EVENT event, std::function<void(int)> func)
-{
-    Subscriber subscriber_arg {fd, event, func};
-    for(auto iter = m_subscribers.begin(); iter != m_subscribers.end(); ++iter)
-    {
-        if (*iter == subscriber_arg)
-        {
-            m_subscribers.erase(iter);
-            return;
-        }
-    }
-    throw std::runtime_error("Dosen't find subscribers to remove\n");
-}
-
-void Reactor::Run(timeval *timeout)
-{
-    fd_set fds_event[3] = {0};
-
-    m_is_running = true;
-    while (m_is_running)
-    {
-        for(size_t i = 0; NUM_OF_EVENTS > i; ++i)
-        {
-            FD_ZERO(&fds_event[i]);
-        }
-
-        // Init the fd_sets with relevant File Descriptors.
-        for(auto iter = m_subscribers.begin(); iter != m_subscribers.end(); ++iter)
-        {
-            FD_SET(iter->m_fd, &fds_event[iter->m_event]);
-        }
-
-        int fds_ready = select(FD_SETSIZE, &fds_event[READ], &fds_event[WRITE], &fds_event[ERROR], timeout);
-        if (0 > fds_ready)    // select failed. 
-        {
-            throw std::runtime_error("select failed\n");
-        }
-        
-        if (0 == fds_ready)     // There are no calls from any File Descriptor. 
-        {
-            //std::cout << "Nothing happened\n";
-        }
-
-        // Execute operations of the subscribers.
-        for(auto iter = m_subscribers.begin(); iter != m_subscribers.end(); ++iter)
-        {
-            if (FD_ISSET(iter->m_fd, &fds_event[iter->m_event]))
-            {
-                iter->m_func(iter->m_fd);
-            }
-        }
-    }
-}
-
-
-void Reactor::Stop()
-{
-    m_is_running = false;
-}
-
-
-bool Reactor::Subscriber::operator==(const Subscriber subscriber_arg)const
-{
-    return (m_fd == subscriber_arg.m_fd &&
-            m_event == subscriber_arg.m_event &&
-            (reinterpret_cast<void*>(*(m_func.target<void(*)(int)>())) 
-            ==
-            reinterpret_cast<void*>(*(subscriber_arg.m_func.target<void(*)(int)>()))
-            )
-           );
-}
-
-
-
-
-
-//-------------------------------------------------------------------------------------------------------
-
-
-
-
-
-class MusicPlayer
-{
-public:
     MusicPlayer();
     ~MusicPlayer();
+    void Run();
     void AddPlayList(std::string plName);
     void AddAudioFile(std::string plName, std::string audioFileName);
     void RemovePlayList(std::string plName);
     void RemoveAudioFile(std::string plName, std::string audioFileName);
-    void Run();
     void Play();
     void Stop();
     void Next();
@@ -370,18 +307,25 @@ public:
 
 private:
     void UpdateCurrPL();
+    void PlayerManager();
     std::map<std::string, PlayList*> m_playLists;
     PlayList* m_currPL;             // PL represent playlist
     AudioFile* m_currAF;            // AF represent AudioFile
     std::atomic<size_t> m_currIndxAF;
     std::atomic<bool> m_isPlay;
     std::condition_variable m_conditionVariable;
+    std::condition_variable m_eventsConditionVariable;
     std::mutex m_mutex;
-    std::thread m_thread;
-    std::thread m_threadUserPL;
+    std::mutex m_eventsMutex;
+    std::thread m_playerManagerThread;
+    std::thread m_userPLThread;
+    std::thread m_eventsThread;
     std::atomic<bool> m_isExit;
+    boost::interprocess::interprocess_semaphore m_semaphore;
+    static const size_t FUNCIONALITY_AMOUT = 9;
+    std::atomic<int> m_event;
     UserInterface m_userInterface;
-    
+
 };
 std::vector<AudioFile*>& PlayList::GetAudioFilesVec()
 {
@@ -395,50 +339,112 @@ MusicPlayer::MusicPlayer()
       m_currIndxAF(0),
       m_isPlay(false),
       m_conditionVariable(),
+      m_eventsConditionVariable(),
       m_mutex(),
-      m_thread(std::thread(&MusicPlayer::Run, this)),
-      m_threadUserPL(std::thread(&MusicPlayer::UpdateCurrPL, this)),
+      m_eventsMutex(),
+      m_playerManagerThread(std::thread(&MusicPlayer::PlayerManager, this)),
+      m_userPLThread(std::thread(&MusicPlayer::UpdateCurrPL, this)),
+      m_eventsThread(),
       m_isExit(false),
-      m_userInterface()
+      m_semaphore(0),
+      m_event(NO_EVENT),
+      m_userInterface(&m_event, FUNCIONALITY_AMOUT, &m_semaphore, &m_eventsMutex, &m_eventsConditionVariable, &m_isExit)
 {}
+
+
 
 MusicPlayer::~MusicPlayer()
 {
     // Stop the playback and wait for the thread to finish
     Stop();
     std::cout << "In ~MusicPlayer before m_thread.join()\n";
-    if (m_thread.joinable())
+    if (m_playerManagerThread.joinable())
     {
-        m_thread.join();
+        m_playerManagerThread.join();
     }
     std::cout << "In ~MusicPlayer after m_thread.join() and before m_threadUserPL.join()\n";
-    if (m_threadUserPL.joinable())
+    if (m_userPLThread.joinable())
     {
-        m_threadUserPL.join();
+        m_userPLThread.join();
     }
-    std::cout << "In ~MusicPlayer after m_threadUserPL.join()\n";
+    std::cout << "In ~MusicPlayer after m_userPLThread.join() and before m_eventsThread.join()\n";
+    if (m_eventsThread.joinable())
+    {
+        m_eventsThread.join();
+    }
+    std::cout << "In ~MusicPlayer after m_eventsThread.join()\n";
     // Clean up the playLists
     for (auto& pair : m_playLists)
     {
         delete pair.second;
-    }
+    } 
+
+    m_semaphore.post();
 }
 
 void MusicPlayer::Run()
+{
+    m_semaphore.post();
+
+    std::unique_lock<std::mutex> lock(m_eventsMutex);
+    while (!m_isExit)
+    {
+        m_event = NO_EVENT;
+        while (m_event == NO_EVENT && !m_isExit)
+        {
+            std::cout << "in Run in while of m_eventsConditionVariable\n";
+            m_eventsConditionVariable.wait(lock);
+        }
+
+        switch (m_event) 
+        {
+            case ADD_PLAY_LIST:
+                AddPlayList("New Playlist");
+                break;
+            case ADD_AUDIO_FILE:
+                AddAudioFile("New Playlist", "song1.wav");
+                break;
+            case REMOVE_PLAY_LIST:
+                RemovePlayList("New Playlist");
+                break;
+            case REMOVE_AUDIO_FILE:
+                RemoveAudioFile("New Playlist", "song1.wav");
+                break;
+            case PLAY:
+                Play();
+                break;
+            case STOP:
+                Stop();
+                break;
+            case NEXT:
+                Next();
+                break;
+            case PREV:
+                Prev();
+                break;
+            case EXIT:
+                Exit();
+                break;
+        }
+    }
+
+}
+
+void MusicPlayer::PlayerManager()
 {
     std::unique_lock<std::mutex> lock(m_mutex);
     while (!m_isExit)
     {
         // Wait if playback is not active or if the current playlist is empty
-        while (!m_isPlay || nullptr != m_currPL || m_currPL->GetAudioFilesVec().empty() && !m_isExit)
+        while (!m_isExit && (!m_isPlay || nullptr != m_currPL || m_currPL->GetAudioFilesVec().empty()))
         {
-            //std::cout << "in Run in while of m_conditionVariable\n";
+            std::cout << "in PlayerManager in while of m_conditionVariable\n";
             m_conditionVariable.wait(lock);
         }
-        //std::cout << "in Run after while of m_conditionVariable\n";
+        std::cout << "in PlayerManager after while of m_conditionVariable\n";
         m_currIndxAF = 0;
 
-        while (m_currIndxAF < m_currPL->GetAudioFilesVec().size() && !m_isExit)
+        while (!m_isExit && (m_currIndxAF < m_currPL->GetAudioFilesVec().size()))
         {
             m_currAF = m_currPL->GetAudioFilesVec()[m_currIndxAF];
             if (!m_isPlay)
@@ -463,36 +469,38 @@ void MusicPlayer::Run()
 
 void MusicPlayer::Play()
 {
+
     std::lock_guard<std::mutex> lock(m_mutex);
-    //std::cout << "in Play before if(!m_isPlay && m_currIndxAF < m_currPL->GetAudioFilesVec().size())\n";
+    std::cout << "in Play before if(!m_isPlay && m_currIndxAF < m_currPL->GetAudioFilesVec().size())\n";
     if (!m_isPlay && m_currIndxAF < m_currPL->GetAudioFilesVec().size())
     {
-        //std::cout << "in Play inside if(!m_isPlay && m_currIndxAF < m_currPL->GetAudioFilesVec().size())\n";
+        std::cout << "in Play inside if(!m_isPlay && m_currIndxAF < m_currPL->GetAudioFilesVec().size())\n";
         m_currAF = m_currPL->GetAudioFilesVec()[m_currIndxAF];
         m_currAF->Play();
         m_isPlay = true;
         m_conditionVariable.notify_one();
     }
-    //std::cout << "in Play after if(!m_isPlay && m_currIndxAF < m_currPL->GetAudioFilesVec().size())\n";
+    std::cout << "in Play after if(!m_isPlay && m_currIndxAF < m_currPL->GetAudioFilesVec().size())\n";
 }
 
 void MusicPlayer::Stop()
 {
     std::lock_guard<std::mutex> lock(m_mutex);
-    //std::cout << "in Stop before if (m_isPlay)\n";
+    std::cout << "in Stop before if (m_isPlay)\n";
     if (m_isPlay)
     {
-        //std::cout << "in Stop inside if (m_isPlay)\n";
+        std::cout << "in Stop inside if (m_isPlay)\n";
         m_currAF->Stop();
         m_isPlay = false;
         m_conditionVariable.notify_one();
     }
-    //std::cout << "in Stop after if (m_isPlay)\n";
+    std::cout << "in Stop after if (m_isPlay)\n";
 }
 
 void MusicPlayer::Next()
 {
     std::lock_guard<std::mutex> lock(m_mutex);
+    std::cout << "in Next Method\n";
     if (m_currIndxAF < m_currPL->GetAudioFilesVec().size() - 1)
     {
         bool wasPlay = m_isPlay;
@@ -511,6 +519,7 @@ void MusicPlayer::Next()
 void MusicPlayer::Prev()
 {
     std::lock_guard<std::mutex> lock(m_mutex);
+    std::cout << "in Prev Method\n";
     if (m_currIndxAF > 0)
     {
         bool wasPlay = m_isPlay;
@@ -529,6 +538,7 @@ void MusicPlayer::Prev()
 void MusicPlayer::AddPlayList(std::string plName)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
+    std::cout << "in AddPlayList Method\n";
     if (m_playLists.find(plName) == m_playLists.end())
     {
         PlayList* playlist = new PlayList(plName);
@@ -541,6 +551,7 @@ void MusicPlayer::AddPlayList(std::string plName)
 void MusicPlayer::AddAudioFile(std::string plName, std::string audioFileName)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
+    std::cout << "in AddAudioFile Method\n";
     auto it = m_playLists.find(plName);
     if (it != m_playLists.end())
     {
@@ -557,7 +568,7 @@ void MusicPlayer::UpdateCurrPL()
         std::string playlistName;
         std::cout << "Enter the name of the playlist:\n";
         std::getline(std::cin, playlistName);
-        //std::unique_lock<std::mutex> lock(m_mutex);
+        m_mutex.lock();
 
         auto it = m_playLists.find(playlistName);
         if (it != m_playLists.end())
@@ -570,13 +581,14 @@ void MusicPlayer::UpdateCurrPL()
         {
             std::cout << "Playlist not found: " << playlistName << std::endl;
         }
-        //std::unique_lock<std::mutex> unlock(m_mutex);
+        m_mutex.unlock();
     }
 }
 
 void MusicPlayer::RemovePlayList(std::string plName)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
+    std::cout << "in RemovePlayList Method\n";
     auto it = m_playLists.find(plName);
     if (it != m_playLists.end())
     {
@@ -593,6 +605,7 @@ void MusicPlayer::RemovePlayList(std::string plName)
 void MusicPlayer::RemoveAudioFile(std::string plName, std::string audioFileName)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
+    std::cout << "in RemoveAudioFile Method\n";
     auto it = m_playLists.find(plName);
     if (it != m_playLists.end())
     {
@@ -628,62 +641,10 @@ void MusicPlayer::Exit()
 int main()
 {
     MusicPlayer musicPlayer;
+    
+    musicPlayer.Run();
 
-    // Create a playlist
-    musicPlayer.AddPlayList("My Playlist");
-    // Add songs to the playlist
-    musicPlayer.AddAudioFile("My Playlist", "song1.wav");
-    musicPlayer.AddAudioFile("My Playlist", "song2.wav");
-    musicPlayer.AddAudioFile("My Playlist", "song3.wav");
-
-    std::this_thread::sleep_for(std::chrono::seconds(3));
-    // Remove an audio file
-    musicPlayer.RemoveAudioFile("My Playlist", "song2.wav");
-
-    // Remove a playlist
-    musicPlayer.RemovePlayList("My Playlist");
-
-    // Add a new playlist
-    musicPlayer.AddPlayList("New Playlist");
-    // Add songs to the new playlist
-    musicPlayer.AddAudioFile("New Playlist", "song4.wav");
-    musicPlayer.AddAudioFile("New Playlist", "song5.wav");
-
-    std::cout << "Needs to Entered again\n";
-    // Wait for some time
-    std::this_thread::sleep_for(std::chrono::seconds(3));
-    // Start playing
-    musicPlayer.Play();
-    // Wait for some time
-    std::this_thread::sleep_for(std::chrono::seconds(1));
-
-    // Stop playback
-    musicPlayer.Stop();
-    // Wait for some time
-    std::this_thread::sleep_for(std::chrono::seconds(1));
-
-    // Remove an audio file
-    musicPlayer.RemoveAudioFile("New Playlist", "new_song1.wav");
-    // Wait for some time
-    std::this_thread::sleep_for(std::chrono::seconds(1));
-
-    // Start playing again
-    musicPlayer.Play();
-    // Wait for some time
-    std::this_thread::sleep_for(std::chrono::seconds(1));
-
-    // Skip to the next song
-    musicPlayer.Next();
-    // Wait for some time
-    std::this_thread::sleep_for(std::chrono::seconds(1));
-
-    // Skip to the previous song
-    musicPlayer.Prev();
-    // Wait for some time
-    std::this_thread::sleep_for(std::chrono::seconds(1));
-
-    // Exit the music player
-    musicPlayer.Exit();
+    //musicPlayer.RemoveAudioFile("New Playlist", "song1.wav");
 
     return 0;
 }
