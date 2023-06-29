@@ -28,3 +28,8 @@ void PlayList::AddAudioFile(const std::string& filename)
         delete audioFile;
     }
 }
+
+std::vector<AudioFile*>& PlayList::GetAudioFilesVec()
+{
+    return m_audioFiles;
+}
